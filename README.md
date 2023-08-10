@@ -1,2 +1,2 @@
-# b_for_book
+# B for Book
 Sell books for bitcoin using the lightning network and autopay
