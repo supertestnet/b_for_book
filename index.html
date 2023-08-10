@@ -787,7 +787,7 @@
                 <h2>Existing books</h2>
                 <div class="existing_books"></div>
             </div>
-            <p>Please upload a book</p>
+            <p>Please upload a book as a txt file</p>
             <div>
                 <form>
                     <p><input accept=".txt" type="file" onchange="if ( this.files[ 0 ].size >= 100000000 ) {alert( 'File too large, make sure it is less than 100 megabytes' ); this.value = null;} else if ( this.files[ 0 ].type != 'text/plain' || !this.files[ 0 ].name.endsWith( '.txt' ) ) {alert( 'Wrong file type, try again with a txt file' ); this.value = null;} else {log( this );}" /></p>
