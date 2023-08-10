@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, user-scalable=no">
+        <script src="https://bitcoincore.tech/apps/bitcoinjs-ui/lib/bitcoinjs-lib.js"></script>
+        <script src="https://supertestnet.github.io/bitcoin-chess/js/qrcode.js"></script>
+        <script src="https://supertestnet.github.io/bitcoin-chess/js/bolt11.js"></script>
+        <script src="https://bundle.run/noble-secp256k1@1.2.14"></script>
+        <script src="https://bundle.run/browserify-cipher@1.0.1"></script>
+        <script src="https://bundle.run/bech32@2.0.0"></script>
+        <style>
+            * {
+                box-sizing: border-box;
+                font-size: 1.15rem;
+                font-family: Arial, sans-serif;
+            }
+            html {
+                max-width: 70ch;
+                padding: 3rem 1rem;
+                margin: auto;
+                line-height: 1.25;
+            }
+            h1 {
+                font-size: 2rem;
+            }
+            h2 {
+                font-size: 1.5rem;
+            }
+            input {
+                line-height: 1.25;
+                width: 100%;
+                height: 1.8rem;
+                font-size: 1.15rem;
+                border: 1px solid grey;
+            }
+            .hidden {
+                display: none;
+            }
+            .underline {
+                text-decoration: underline;
+            }
+            .wallet {
+                background-color: lightgrey;
+                padding: 0.5rem;
+                float: right;
+                margin-bottom: 1rem;
+                text-align: center;
+                width: 100%;
+                max-width: 12rem;
+            }
+            .balance_box {
+                cursor: pointer;
+            }
+            .deposit, .withdraw {
+                cursor: pointer;
+            }
+            .author .book {
+                display: inline-block;
+                border: 1px solid black;
+                border-radius: 1rem;
+                background-color: lightgrey;
+                word-break: break-word;
+                padding: 1rem;
+                margin: 1rem;
+                max-width: 10rem;
+                cursor: pointer;
+                text-decoration: none;
+                color: black;
+                text-align: center;
+            }
+            .qr_postscript {
+                font-size: 70%;
+                margin-top: 0.5rem;
+            }
+            .sticky {
+                position: fixed;
+                bottom: 0px;
+            }
+            @media screen and (max-width: 500px) {
+                .wallet {
+                    max-width: none;
+                }
+                .author .book {
+                    margin: 1rem 0;
+                    width: 100%;
+                    max-width: none;
+                }
+            }
+        </style>
+        <script>
+            var $ = document.querySelector.bind( document );
+            var $$ = document.querySelectorAll.bind( document );
+            var url_params = new URLSearchParams( window.location.search );
+            var url_keys = url_params.keys();
+            var $_GET = {}
+            for ( var key of url_keys ) $_GET[ key ] = url_params.get( key );
+        </script>
+        <script>
+            var { getSharedSecret, schnorr, utils } = nobleSecp256k1;
+            var crypto  = window.crypto;
+            var getRand = size => crypto.getRandomValues(new Uint8Array(size));
+            var sha256  = bitcoinjs.crypto.sha256;
+            var keypair = bitcoinjs.ECPair.makeRandom();
+            if ( $_GET[ "privkey" ] ) var privKey = $_GET[ "privkey" ]; else var privKey = keypair.privateKey.toString( "hex" );
+            var pubKey  = nobleSecp256k1.getPublicKey( privKey, true ).substring( 2 );
+            if ( !$_GET[ "book" ] && !$_GET[ "privkey" ] ) window.location.href = window.location.href + `?privkey=${privKey}`;
+            console.log( pubKey );
+            var relay = "wss://nostrue.com";
+            var socket = new WebSocket( relay );
+            socket.addEventListener('message', async function( message ) {
+                var [ type, subId, event ] = JSON.parse( message.data );
+                var { kind, content } = event || {}
+                if (!event || event === true) return;
+                // console.log('message:', event);
+                if (kind === 4) {
+                    content = await decrypt(privKey, event.pubkey, content);
+                }
+                if ( kind === 7711 ) {
+                    wallet_info = JSON.parse( decrypt( privKey, pubKey, content ) );
+                    localStorage[ "wallet_info" ] = JSON.stringify( wallet_info );
+                    loopnum = 1;
+                }
+                if ( kind === 7710 ) {
+                    if ( $_GET[ "book" ] ) {
+                        domain_and_inkeys = JSON.parse( content )[ "domain_and_inkeys" ];
+                        $( 'h1' ).innerText = JSON.parse( content )[ "book_name" ];
+                        domain_and_inkeys.forEach( ( item, index ) => {
+                            if ( index > 1 ) section_objs.push({requested: false, obtained: false, redo: false});
+                        });
+                    }
+                    else {
+                        // var encrypted_wallet = JSON.parse( content )[ "lnbits_secret" ];
+                        // wallet_info = JSON.parse( decrypt( privKey, pubKey, encrypted_wallet ) );
+                        var book = document.createElement( "a" );
+                        book.innerText = JSON.parse( content )[ "book_name" ];
+                        book.className = "book";
+                        book.href = window.location.href.substring( 0, window.location.href.indexOf( "?" ) ) +
+                        "?book=" + event.id;
+                        book.target = "_blank";
+                        $( '.existing_books' ).append( book );
+                        $( '.existing_books_wrapper' ).classList.remove( "hidden" );
+                    }
+                }
+            });
+
+            socket.addEventListener('open', async function( e ) {
+                console.log( "connected to " + relay );
+                if ( $_GET[ "book" ] ) {
+                    var subId   = bitcoinjs.ECPair.makeRandom().privateKey.toString( "hex" ).substring( 0, 16 );
+                    var filter  = { "ids": [ $_GET[ "book" ] ] }                 
+                    var subscription = [ "REQ", subId, filter ];
+                    socket.send(JSON.stringify( subscription ));
+                } else {
+                    var subId   = bitcoinjs.ECPair.makeRandom().privateKey.toString( "hex" ).substring( 0, 16 );
+                    var filter  = { "kinds": [ 7710, 7711 ], "authors": [ pubKey ], limit: 1 }                 
+                    var subscription = [ "REQ", subId, filter ];
+                    socket.send(JSON.stringify( subscription ));
+                }
+            });
+            async function getSignedEvent(event, privateKey) {
+                var eventData = JSON.stringify([
+                    0,                  // Reserved for future use
+                    event['pubkey'],        // The sender's public key
+                    event['created_at'],    // Unix timestamp
+                    event['kind'],      // Message “kind” or type
+                    event['tags'],      // Tags identify replies/recipients
+                    event['content']        // Your note contents
+                ])
+                event.id  = sha256( eventData ).toString( 'hex' );
+                event.sig = await schnorr.sign( event.id, privateKey );
+                return event;
+            }
+            function hexToBytes( hex ) {
+                return Uint8Array.from( hex.match( /.{1,2}/g ).map( ( byte ) => parseInt( byte, 16 ) ) );
+            }
+
+            function bytesToHex( bytes ) {
+                return bytes.reduce( ( str, byte ) => str + byte.toString( 16 ).padStart( 2, '0' ), '' );
+            }
+            function base64ToHex( str ) {
+                var raw = atob( str );
+                var result = '';
+                var i; for ( i=0; i<raw.length; i++ ) {
+                    var hex = raw.charCodeAt( i ).toString( 16 );
+                    result += ( hex.length === 2 ? hex : '0' + hex );
+                }
+                return result;
+            }
+            function encrypt( privkey, pubkey, text ) {
+                var key = nobleSecp256k1.getSharedSecret( privkey, '02' + pubkey, true ).substring( 2 );
+                var iv = window.crypto.getRandomValues(new Uint8Array(16));
+                var cipher = browserifyCipher.createCipheriv( 'aes-256-cbc', hexToBytes( key ), iv );
+                var encryptedMessage = cipher.update(text,"utf8","base64");
+                emsg = encryptedMessage + cipher.final( "base64" );
+                var uint8View = new Uint8Array( iv.buffer );
+                var decoder = new TextDecoder();
+                return emsg + "?iv=" + btoa( String.fromCharCode.apply( null, uint8View ) );
+            }
+            function decrypt( privkey, pubkey, ciphertext ) {
+                var [ emsg, iv ] = ciphertext.split( "?iv=" );
+                var key = nobleSecp256k1.getSharedSecret( privkey, '02' + pubkey, true ).substring( 2 );
+                var decipher = browserifyCipher.createDecipheriv(
+                    'aes-256-cbc',
+                    hexToBytes( key ),
+                    hexToBytes( base64ToHex( iv ) )
+                );
+                var decryptedMessage = decipher.update( emsg, "base64" );
+                dmsg = decryptedMessage + decipher.final( "utf8" );
+                return dmsg;
+            }
+        </script>
+        <script>
+            var full_book = [];
+            var domain_and_inkeys = [];
+            var invoices_and_text_links = [];
+            var section_objs = [];
+            var wallet_info = null;
+            var loopnum = 5;
+            var balance_was = 0;
+            var lud_was = null;
+            var tracking_is_on = false;
+            var payment_in_progress = false;
+            async function makeLNWallet( identifier ) {
+                identifier = identifier.substring( 0, 15 );
+                if ( $_GET[ "admin" ] ) var domain = "https://wallet.sost.tech"; else var domain = "https://legend.lnbits.com";
+                var mywallet = await getData( `${domain}/wallet?nme=` + identifier );
+                var key1prep = mywallet.split( "Wallet ID:" );
+                var wallet_id = key1prep[ 1 ].substring( 14, 46 );
+                var key2prep = mywallet.split( "Admin key:" );
+                var adminkey = key2prep[ 1 ].substring( 14, 46 );
+                var key3prep = mywallet.split( "Invoice/read key:" );
+                var readkey = key3prep[ 1 ].substring( 14, 46 );
+                var key4prep = mywallet.split( "<qrcode" );
+                var wallet_url = key4prep[ 2 ].split( "'" )[ 1 ] + key4prep[ 2 ].split( "'" )[ 3 ];
+                var wallet_obj = {}
+                wallet_obj[ "wallet_id" ] = wallet_id;
+                wallet_obj[ "adminkey" ] = adminkey;
+                wallet_obj[ "readkey" ] = readkey;
+                wallet_obj[ "wallet_url" ] = wallet_url;
+                var json = {}
+                json[ "description" ] = "Deposit";
+                json[ "min" ] = 1;
+                json[ "max" ] = 9007199254740991;
+                // json[ "comment_chars" ] = 240;
+                var domain = wallet_url.substring( 0, wallet_url.indexOf( "/wallet" ) );
+                var response = await postData( domain + "/lnurlp/api/v1/links", JSON.stringify( json ), "application/json", adminkey );
+                var response = JSON.parse( response );
+                var lud06 = response[ "lnurl" ];
+                wallet_obj[ "lud06" ] = lud06;
+                var json = {}
+                json[ "title" ] = "Withdraw";
+                json[ "min_withdrawable" ] = 10;
+                json[ "max_withdrawable" ] = 9007199254740991;
+                json[ "uses" ] = 250;
+                json[ "wait_time" ] = 1;
+                json[ "is_unique" ] = false;
+                var response = await postData( domain + "/withdraw/api/v1/links", JSON.stringify( json ), "application/json", adminkey );
+                var response = JSON.parse( response );
+                var lud03 = response[ "lnurl" ];
+                wallet_obj[ "lud03" ] = lud03;
+                return wallet_obj;
+            }
+            var log = file => {
+                if ( "files" in file ) {
+                    file = file.files[ 0 ];
+                }
+                var txtReader = new FileReader();
+                txtReader.onloadstart = () => {
+                    $( '.progress' ).classList.remove( "hidden" );
+                    console.log( "loading book..." );
+                }
+                txtReader.onprogress = progress => {
+                    percent = ( progress.loaded / progress.total ) * 100;
+                    console.log( String( Math.floor( percent ) ) + "% loaded" );
+                }
+                txtReader.onloadend = () => {
+                    var string = txtReader.result.toString();
+                    var index = string.indexOf( ";base64," );
+                    string = string.substring( index + 8 );
+                    console.log( "100% loaded" );
+                    var book = atob( string );
+                    if ( book.length < 20000 ) {
+                        alert( "Your book is too short, try again. It must be a minimum of 20,000 characters." );
+                        return;
+                    }
+                    var price = prompt( "How much money (in sats) do you want to charge for your book?" );
+                    price = Number( price );
+                    if ( price < 5000 ) {
+                        alert( "Your price is too low, try again. It must be a minimum of 5,000 sats." );
+                        return;
+                    }
+                    monetizeBook( book, price );
+                }
+                txtReader.readAsDataURL( file );
+            }
+            var monetizeBook = async ( book, price ) => {
+                var array = book.split( " " );
+                var num_of_words = array.length;
+                var num_of_sections = Math.ceil( num_of_words / 1000 );
+                var price_per_section = Math.round( price / num_of_sections );
+                console.log( `Each user will pay ${price_per_section} sats per section of 1000 words. After buying ${num_of_sections} sections they will have paid ${price_per_section * num_of_sections} sats -- which should be close to your chosen price of ${price} sats -- and they will own ${num_of_sections * 1000} words. That works because the book has a total of ${num_of_words} words in it, so they will own the whole book.` );
+                var sections = [];
+                var prev_i = 0;
+                var i; for ( i=1000; i<( num_of_sections * 1000 ) + 1; i = i + 1000 ) {
+                    var slice = array.slice( prev_i, i );
+                    prev_i = i;
+                    sections.push( slice );
+                }
+                sections.forEach( section => {
+                    full_book.push( section.join( " " ).replaceAll( "\n", "BFORBOOK_LINEBREAK" ) );
+                });
+                //begin monetization
+                var book_name = prompt( "Enter your book's name" );
+                if ( book_name.includes( "]" ) ) {
+                    alert( "book names cannot contain brackets, please try again" );
+                    return;
+                }
+                var i; for ( i=0; i<num_of_sections; i++ ) {
+                    console.log( "percent done:", String( Math.floor( ( i / num_of_sections ) * 100 ) ) + "%" );
+                    $( '.progressBar' ).style.width = String( Math.floor( ( i / num_of_sections ) * 100 ) ) + "%";
+                    var pagenum = i + 1;
+                    var content = full_book[ i ];
+                    var domain = "https://legend.lnbits.com";
+                    var url = wallet_info[ "wallet_url" ];
+                    var admin_id = url.substring( url.indexOf( "?usr=" ) + 5, url.indexOf( "&wal=" ) );
+                    var invoicekey = wallet_info[ "readkey" ];
+                    console.log( `creating wallet ${pagenum}` );
+                    var content_wallet = await createWallet( `${book_name} §${pagenum}`, domain, admin_id, invoicekey );
+                    console.log( content_wallet );
+                    content_wallet = JSON.parse( content_wallet );
+                    var source_wallet_id = content_wallet[ "id" ];
+                    var source_wallet_name = content_wallet[ "name" ];
+                    var source_wallet_admin_key = content_wallet[ "adminkey" ];
+                    var source_wallet_invoice_key = content_wallet[ "inkey" ];
+                    console.log( `forwarding payments from wallet ${pagenum} to ${wallet_info[ "wallet_id" ]}` );
+                    var payments_are_forwarded = await forwardPayments( "author", domain, source_wallet_id, source_wallet_name, source_wallet_admin_key, source_wallet_invoice_key, admin_id, wallet_info[ "wallet_id" ] );
+                    if ( !payments_are_forwarded ) {
+                        alert( "oh no! Payments were not forwarded:", payments_are_forwarded );
+                        return;
+                    }
+                    console.log( `setting up shop for wallet ${pagenum}` );
+                    var shop_is_set_up = await setupShop( domain, book_name, pagenum, price_per_section, source_wallet_invoice_key );
+                    console.log( `setting up content for wallet ${pagenum}` );
+                    var content_is_set = await setContent( domain, content, source_wallet_invoice_key );
+                    if ( !content_is_set ) {
+                        alert( "oh no! Content was not set:", content_is_set );
+                        return;
+                    }
+                    if ( !i ) {
+                        domain_and_inkeys.push( domain );
+                        domain_and_inkeys.push( price_per_section );
+                    }
+                    domain_and_inkeys.push( source_wallet_invoice_key );
+                }
+                $( '.progressBar' ).style.width = "100%";
+                await waitSomeSeconds( 1 );
+                $( '.progress' ).classList.add( "hidden" );
+                var message = {
+                    // lnbits_secret: encrypt( privKey, pubKey, JSON.stringify( wallet_info ) ),
+                    domain_and_inkeys: domain_and_inkeys,
+                    book_name: book_name,
+                }
+                var event = {
+                    "content"    : JSON.stringify( message ),
+                    "created_at" : Math.floor( Date.now() / 1000 ),
+                    "kind"       : 7710,
+                    "tags"       : [],
+                    "pubkey"     : pubKey,
+                }
+                var signedEvent = await getSignedEvent(event, privKey);
+                socket.send(JSON.stringify([ "EVENT", signedEvent ]));
+                await waitSomeSeconds( 1 );
+            }
+            var createWallet = async ( wallet_name, domain = "https://legend.lnbits.com", admin_user_id = "7cf3b298e89b43d48678ccbf82092e7d", invoice_api_key = "2c0394ffcfaf43f480205e3285be18cc" ) => {
+                var url = `${domain}/usermanager/api/v1/wallets`;
+                var json = JSON.stringify({"user_id": admin_user_id, "wallet_name": wallet_name, "admin_id": admin_user_id});
+                var content_type = "application/json";
+                var apikey = invoice_api_key;
+                var result = await postData( url, json, content_type, apikey );
+                return result;
+            }
+            var forwardPayments = async ( alias_of_target_wallet, domain = "https://legend.lnbits.com", source_wallet_id = "267e38d9d0fd4e82a545bbb865c1a391", source_wallet_name = "test3", source_wallet_admin_key = "9dcb2400ff6d48e78fb03aa8dd1e26de", source_wallet_invoice_key = "f87c263d44604525a1eb181680af5f98", admin_user_id = "7cf3b298e89b43d48678ccbf82092e7d", target_wallet_id = "027cfe90e71e4a41ac78a68f9e19db1e" ) => {
+                var url = `${domain}/splitpayments/api/v1/targets`;
+                var json = JSON.stringify({"targets":[{"source":{"id": source_wallet_id,"name": source_wallet_name,"adminkey": source_wallet_admin_key,"inkey": source_wallet_invoice_key,"msat":0,"sat":0,"fsat":"0","url":`/wallet?usr=${admin_user_id}&wal=${source_wallet_id}`},"alias": alias_of_target_wallet,"wallet": target_wallet_id,"percent":100}]});
+                var content_type = "application/json";
+                var apikey = source_wallet_admin_key;
+                var response = await postData( url, json, content_type, apikey, "PUT" );
+                response = String( response );
+                if ( response === "null" ) var success = true; else var success = `false: ${response}`;
+                return success;
+            }
+            var setupShop = async ( domain = "https://legend.lnbits.com", book_name, page = 1, price = 50, source_wallet_invoice_api_key = "f87c263d44604525a1eb181680af5f98" ) => {
+                page = String( page );
+                var url = `${domain}/offlineshop/api/v1/offlineshop/items`;
+                var json = JSON.stringify({"name": `${book_name} §${page}`, "description": "n/a", "price": price, "unit": "sat"});
+                var content_type = "application/json";
+                var apikey = source_wallet_invoice_api_key;
+                var result = postData( url, json, content_type, apikey );
+                await waitSomeSeconds( 1 );
+                return true;
+            }
+            var setContent = async ( domain = "https://legend.lnbits.com", content = "abababababababababababababababababababababababababababababababab", source_wallet_invoice_api_key = "f87c263d44604525a1eb181680af5f98" ) => {
+                var url = `${domain}/offlineshop/api/v1/offlineshop/method`;
+                var json = JSON.stringify({"method":"wordlist","wordlist": content});
+                var content_type = "application/json";
+                var apikey = source_wallet_invoice_api_key;
+                var response = await postData( url, json, content_type, apikey, "PUT" );
+                response = String( response );
+                if ( response === "null" ) var success = true; else var success = `false: ${response}`;
+                return success;
+            }
+            var getLnurl = async ( domain = "https://legend.lnbits.com", source_wallet_invoice_api_key = "f87c263d44604525a1eb181680af5f98" ) => {
+                var url = `${domain}/offlineshop/api/v1/offlineshop`;
+                var content_type = "application/json";
+                var apikey = source_wallet_invoice_api_key;
+                var response = await getData( url, content_type, apikey );
+                var json = JSON.parse( response );
+                if ( !( json[ "items" ] && json[ "items" ][ 0 ] && json[ "items" ][ 0 ][ "lnurl" ] ) ) return "error";
+                return json[ "items" ][ 0 ][ "lnurl" ];
+            }
+            var decodeLnurl = lnurl => {
+                var words = bech32.bech32.decode( lnurl ).words;
+                var bytes = bech32.bech32.fromWords( words );
+                var hex = bytesToHex( bytes ).toString( "hex" );
+                var txt = hexToText( hex );
+                return txt;
+            }
+            var getInvoiceAndTextLink = async ( lnurl, amt ) => {
+                amt = amt * 1000;
+                var url_where_callback_is = decodeLnurl( lnurl );
+                var json_containing_callback = await getData( url_where_callback_is );
+                var callback = JSON.parse( json_containing_callback )[ "callback" ];
+                var json = await getData( callback + "?amount=" + amt );
+                json = JSON.parse( json );
+                var invoice = json[ "pr" ];
+                var text_link = json[ "successAction" ][ "url" ];
+                return [ invoice, text_link ];
+            }
+            async function postData( url, json, content_type = "", apikey = "", post_or_put = "POST" ) {
+                var rtext = "";
+                function inner_post( url, json, content_type = "", apikey = "" ) {
+                    var xhttp = new XMLHttpRequest();
+                    xhttp.open( post_or_put, url, true );
+                    if ( content_type ) {
+                        xhttp.setRequestHeader( `Content-Type`, content_type );
+                    }
+                    if ( apikey ) {
+                        xhttp.setRequestHeader( `X-Api-Key`, apikey );
+                    }
+                    xhttp.send( json );
+                    return xhttp;
+                }
+                var data = inner_post( url, json, content_type, apikey );
+                data.onerror = function( e ) {
+                    rtext = "error";
+                }
+                async function isResponseReady() {
+                    return new Promise( function( resolve, reject ) {
+                        if ( rtext == "error" ) {
+                            resolve( rtext );
+                        }
+                        if ( !data.responseText || data.readyState != 4 ) {
+                            setTimeout( async function() {
+                                var msg = await isResponseReady();
+                                resolve( msg );
+                            }, 50 );
+                        } else {
+                            resolve( data.responseText );
+                        }
+                    });
+                }
+                var returnable = await isResponseReady();
+                return returnable;
+            }
+            function getData( url, content_type, apikey ) {
+                return new Promise( async function( resolve, reject ) {
+                    function inner_get( url, content_type, apikey ) {
+                        var xhttp = new XMLHttpRequest();
+                        xhttp.open( "GET", url, true );
+                        if ( content_type ) {
+                            xhttp.setRequestHeader( `Content-Type`, content_type );
+                        }
+                        if ( apikey ) {
+                            xhttp.setRequestHeader( `X-Api-Key`, apikey );
+                        }
+                        xhttp.send();
+                        return xhttp;
+                    }
+                    var data = inner_get( url, content_type, apikey );
+                    data.onerror = function( e ) {
+                        resolve( "error" );
+                    }
+                    async function isResponseReady() {
+                        return new Promise( function( resolve2, reject ) {
+                            if ( !data.responseText || data.readyState != 4 ) {
+                                setTimeout( async function() {
+                                    var msg = await isResponseReady();
+                                    resolve2( msg );
+                                }, 1 );
+                            } else {
+                                resolve2( data.responseText );
+                            }
+                        });
+                    }
+                    var returnable = await isResponseReady();
+                    resolve( returnable );
+                });
+            }
+            var waitSomeSeconds = num => {
+                var num = num.toString() + "000";
+                num = Number( num );
+                return new Promise( resolve => setTimeout( resolve, num ) );
+            }
+            function hexToText( hex ) {
+                var bytes = new Uint8Array(Math.ceil(hex.length / 2));
+                for (var i = 0; i < hex.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+                var text = new TextDecoder().decode( bytes );
+                return text;
+            }
+            var returnContentIfPurchased = async text_link => {
+                try {
+                    var text = await getData( text_link );
+                    return text;
+                } catch ( e ) {
+                    return;
+                }
+            }
+            var initWallet = async () => {
+                if ( wallet_info ) return;
+                var alias = "reader";
+                if ( $_GET[ "privkey" ] ) alias = "author";
+                wallet_info = await makeLNWallet( alias );
+                localStorage[ "wallet_info" ] = JSON.stringify( wallet_info );
+                if ( !$_GET[ "privkey" ] ) return wallet_info;
+                var message = encrypt( privKey, pubKey, JSON.stringify( wallet_info ) );
+                var event = {
+                    "content"    : message,
+                    "created_at" : Math.floor( Date.now() / 1000 ),
+                    "kind"       : 7711,
+                    "tags"       : [],
+                    "pubkey"     : pubKey,
+                }
+                var signedEvent = await getSignedEvent(event, privKey);
+                socket.send(JSON.stringify([ "EVENT", signedEvent ]));
+                return wallet_info;
+            }
+            if ( localStorage[ "wallet_info" ] ) {
+                wallet_info = JSON.parse( localStorage[ "wallet_info" ] );
+                loopnum = 1;
+            }
+            setTimeout( initWallet, 5000 );
+            var loadmore = async ( reload, section ) => {
+                // console.log( "section to get:", section + 1, "| sections got:", sections_got );
+                if ( section === undefined ) return;
+                payment_in_progress = true;
+                // if ( section > -1 && sections_got !== section ) {
+                //    return console.log( `cancelling because the "sections to get" number (${section}) and the "sections got" number (${sections_got}) are not identical` );
+                // }
+                var da_section = Number( $( '.load_more' ).getAttribute( "data-section" ) );
+                section_objs[ da_section ][ "requested" ] = true;
+                if ( !domain_and_inkeys[ section + 2 ] ) {
+                    var message = "There is nothing to load";
+                    if ( section > 0 ) message = "There is nothing more to load";
+                    return alert( message );
+                }
+                if ( !reload ) {
+                    console.log( `getting lnurl for page ${section + 1}` );
+                    var lnurl = await getLnurl( domain_and_inkeys[ 0 ], domain_and_inkeys[ section + 2 ] );
+                    var price_per_section = domain_and_inkeys[ 1 ];
+                    console.log( `getting invoice and text link for page ${section + 1}` );
+                    var invoice_and_text_link = await getInvoiceAndTextLink( lnurl, price_per_section );
+                    invoices_and_text_links.push( invoice_and_text_link );
+                }
+                var text_link = invoices_and_text_links[ section ][ 1 ];
+                var text = await returnContentIfPurchased( text_link );
+                if ( !text || text.startsWith( `{"detail":"Payment` ) ) {
+                    var wallet_url = wallet_info[ "wallet_url" ];
+                    var domain = wallet_url.substring( 0, wallet_url.indexOf( "/wallet" ) );
+                    if ( domain === domain_and_inkeys[ 0 ] && !window.webln ) {
+                        var paid = confirm( `You cannot pay this invoice from the built in wallet. The built in wallet is an lnbits wallet and the recipient is also using lnbits. Lnbits has a bug where "paying itself" results in an error that can cause loss of funds. However, you can still download the book, just pay this invoice using another wallet and then click ok:\n\n${invoices_and_text_links[ section ][ 0 ]}` );
+                    } else {
+                        var paid = await attemptPayment( invoices_and_text_links[ section ][ 0 ] );
+                    }
+                    if ( paid ) {
+                        console.log( "waiting...", Math.floor( Date.now() / 1000 ) );
+                        await waitSomeSeconds( 2 );
+                        console.log( "done!", Math.floor( Date.now() / 1000 ) );
+                        loadmore( true, section );
+                        if ( !tracking_is_on ) trackButton();
+                    }
+                    else {
+                        payment_in_progress = false;
+                        alert( `Sorry, but your payment failed. Please try again.` );
+                        invoices_and_text_links.pop();
+                    }
+                    return;
+                }
+                text = text.split( " " );
+                text.reverse();
+                var index_of_last_bracket = -1;
+                text.every( ( word, index ) => {
+                    if ( word.includes( "]" ) ) {
+                        index_of_last_bracket = index;
+                        return;
+                    }
+                    return true;
+                });
+                // console.log( "index of last bracket:", index_of_last_bracket, text[ index_of_last_bracket ] );
+                text.splice( 0, index_of_last_bracket );
+                var last_one = text[ 0 ];
+                // console.log( "last one:", last_one );
+                var array = last_one.split( "" );
+                array.reverse();
+                // console.log( "last one as reversed array:", array );
+                var index = array.indexOf( "]" );
+                array.splice( 0, index + 1 );
+                // console.log( "last one after eliminating bracket:", array );
+                array.reverse();
+                // console.log( "last one unreversed:", array );
+                text[ 0 ] = array.join( "" );
+                text.reverse();
+                text = text.join( " " );
+                text = text.replaceAll( "BFORBOOK_LINEBREAK", "\n" );
+                text = text.substring( 2 );
+                if ( section ) {
+                    $( '.reader .book' ).innerText += " " + text;
+                } else {
+                    $( '.reader .book' ).innerText += text;
+                }
+                var da_section = Number( $( '.load_more' ).getAttribute( "data-section" ) );
+                section_objs[ Number( $( '.load_more' ).getAttribute( "data-section" ) ) ][ "obtained" ] = true;
+                if ( section_objs[ section_objs.length - 1 ][ "obtained" ] ) $( '.load_more' ).classList.add( "hidden" );
+                $( '.load_more' ).setAttribute( "data-section", String( section + 1 ) );
+                $( '.load_more' ).innerText = "Load more";
+                payment_in_progress = false;
+            }
+            async function getLNBalance() {
+                var wallet_url = wallet_info[ "wallet_url" ];
+                var readkey = wallet_info[ "readkey" ];
+                var domain = wallet_url.substring( 0, wallet_url.indexOf( "/wallet" ) );
+                var url = domain + "/api/v1/wallet";
+                var winfo = await getData( url, "application/json", readkey )
+                winfo = JSON.parse( winfo );
+                var balance = Number( Math.floor( winfo[ "balance" ] / 1000 ) );
+                return balance;
+            }
+            function createQR( content ) {
+                var dataUriPngImage = document.createElement( "img" ),
+                s = QRCode.generatePNG( content, {
+                    ecclevel: "M",
+                    format: "html",
+                    fillcolor: "#FFFFFF",
+                    textcolor: "#000000",
+                    margin: 4,
+                    modulesize: 8,
+                });
+                dataUriPngImage.src = s;
+                dataUriPngImage.className = "qr_code";
+                dataUriPngImage.style.width = "100%";
+                return dataUriPngImage;
+            }
+            var loop = async () => {
+                loopnum = loopnum - 1;
+                if ( loopnum < 1 ) {
+                    try {
+                        var balance = await getLNBalance();
+                        if ( balance < 4 ) balance = 0;
+                        $( '.balance' ).innerHTML = String( balance ) + "&nbsp;sats";
+                        //don't change the lud if I just changed it
+                        if ( balance === balance_was || balance < 13 ) {
+                            if ( wallet_info && "lud03" in wallet_info && wallet_info[ "lud03" ] === lud_was ) {
+                                loopnum = 10;
+                                loop();
+                                return;
+                            }
+                        }
+                        if ( balance < 13 ) {
+                            loopnum = 10;
+                            loop();
+                            return;
+                        }
+                        var negator = 3;
+                        if ( balance > 100 ) negator = Math.ceil( .01 * balance );
+                        var json = {}
+                        json[ "title" ] = "Withdraw";
+                        json[ "min_withdrawable" ] = 10;
+                        json[ "max_withdrawable" ] = balance - negator;
+                        json[ "uses" ] = 250;
+                        json[ "wait_time" ] = 1;
+                        json[ "is_unique" ] = false;
+                        var wallet_url = wallet_info[ "wallet_url" ];
+                        var adminkey = wallet_info[ "adminkey" ];
+                        var domain = wallet_url.substring( 0, wallet_url.indexOf( "/wallet" ) );
+                        var response = await postData( domain + "/withdraw/api/v1/links", JSON.stringify( json ), "application/json", adminkey );
+                        var response = JSON.parse( response );
+                        var lud03 = response[ "lnurl" ];
+                        wallet_info[ "lud03" ] = lud03;
+                        var lnurl = wallet_info[ "lud03" ];
+                        var url = "lightning:" + lnurl;
+                        var a = document.createElement( "a" );
+                        a.href = url;
+                        a.target = "_blank";
+                        a.append( createQR( url.toUpperCase() ) );
+                        var prep_div = document.createElement( "div" );
+                        prep_div.append( a );
+                        var div_html = prep_div.innerHTML;
+                        var html = `${div_html}`;
+                        var div = document.createElement( "div" );
+                        div.innerHTML = html;
+                        if ( $( '.withdraw' ).classList.contains( "underline" ) ) $( '.qr_code' ).innerHTML = ``;
+                        if ( $( '.withdraw' ).classList.contains( "underline" ) ) $( '.qr_code' ).append( div.firstElementChild );
+                        lud_was = lud03;
+                        balance_was = balance;
+                    } catch( e ) {}
+                }
+                var num = 10;
+                await waitSomeSeconds( 1 );
+                if ( loopnum < 1 ) loopnum = 10;
+                loop();
+            }
+            var attemptPayment = async invoice => {
+                if ( window.webln ) {
+                    await window.webln.enable();
+                    try {
+                        var result = await window.webln.sendPayment( invoice );
+                        if ( "preimage" in result ) return true;
+                    } catch ( e ) {
+                        return;
+                    }
+                    return;
+                }
+                var payreq = bolt11.decode( invoice );
+                var amt_requested = payreq[ "satoshis" ];
+                var amt_i_have = $( '.balance' ).innerText.substring( 0, $( '.balance' ).innerText.indexOf( "s" ) - 1 );
+                amt_i_have = Number( amt_i_have );
+                if ( amt_i_have < amt_requested + 10 ) {
+                    alert( `You don't have enough sats to pay this invoice. It requests ${amt_requested} sats with a fee of up to 10 sats (so ${amt_requested + 10} sats total) and you only have ${amt_i_have} sats available.` );
+                    return;
+                }
+                var wallet_url = wallet_info[ "wallet_url" ];
+                var adminkey = wallet_info[ "adminkey" ];
+                var domain = wallet_url.substring( 0, wallet_url.indexOf( "/wallet" ) );
+                var json = {
+                    out: true,
+                    bolt11: invoice
+                }
+                var paid = await postData( domain + "/api/v1/payments", JSON.stringify( json ), "application/json", adminkey );
+                try {
+                    var obj = JSON.parse( paid );
+                    if ( "payment_hash" in obj ) paid = true;
+                    loopnum = 1;
+                } catch( e ) {
+                    paid = false;
+                }
+                return paid;
+            }
+            var trackButton = async () => {
+                if ( section_objs[ section_objs.length - 1 ][ "obtained" ] ) {
+                    $( '.load_more' ).classList.add( "hidden" );
+                    return;
+                }
+                var button = $( '.load_more' );
+                var distanceDown = window.pageYOffset + button.getBoundingClientRect().top;
+                var sticky = $( '.sticky' );
+                var comparison = window.pageYOffset + sticky.getBoundingClientRect().top;
+                if ( !payment_in_progress && distanceDown - comparison < 1000 && section_objs[ Number( button.getAttribute( "data-section" ) ) - 1 ] && section_objs[ Number( button.getAttribute( "data-section" ) ) - 1 ][ "obtained" ] && section_objs[ Number( button.getAttribute( "data-section" ) ) ] && !section_objs[ Number( button.getAttribute( "data-section" ) ) ][ "requested" ] ) {
+                    $( '.load_more' ).click();
+                }
+                await waitSomeSeconds( 5 );
+                trackButton();
+            }
+        </script>
+    </head>
+    <body>
+        <div class="wallet" data-status="0">
+            <div class="balance_box">Balance: <span class="balance">loading...</span></div>
+            <div class="qr_stuff hidden">
+                <div class="qr_code"></div>
+                <div class="qr_label"><span class="deposit underline">Deposit</span> | <span class="withdraw">Withdraw</span></div>
+                <div class="qr_postscript hidden">Some sats reserved for fees</div>
+            </div>
+        </div>
+        <h1>₿&nbsp;for&nbsp;Book</h1>
+        <div class="author">
+            <div class="existing_books_wrapper hidden">
+                <h2>Existing books</h2>
+                <div class="existing_books"></div>
+            </div>
+            <p>Please upload a book</p>
+            <div>
+                <form>
+                    <p><input type="file" onchange="if ( this.files[ 0 ].size < 100000000 ) {log( this );} else {alert( 'File too large, make sure it is less than 100 megabytes' ); this.value = null;}" /></p>
+                </form>
+            </div>
+            <div class="progress hidden">
+                <h2>Upload progress <span id="goal" style="font-size: .8em; font-weight: normal;"></span></h2>
+                <div class="progressOutline" style="height: 2em; border: 1px solid grey; border-radius: 25px; overflow: hidden;">
+                    <div class="progressBar" style="height: 2em; background-color: #61eb34; width: 0%; transition: width 1s;">
+                    </div>
+                </div>
+                <div class="status"></div>
+            </div>
+        </div>
+        <div class="reader">
+            <div class="book"></div>
+            <p style="text-align: center;"><button class="load_more" data-section="0">Read book</button></p>
+        </div>
+        <div class="sticky"></div>
+        <script>
+            window.onload = () => {if ( $_GET[ "book" ] && window.webln ) $( '.wallet' ).classList.add( "hidden" );}
+            if ( $_GET[ "privkey" ] ) $( '.reader' ).classList.add( "hidden" ); else $( '.author' ).classList.add( "hidden" );
+            $( '.load_more' ).addEventListener( "click", () => loadmore( null, Number( $( '.load_more' ).getAttribute( "data-section" ) ) ) );
+            $( '.balance_box' ).onclick = () => {
+                if ( $( '.wallet' ).getAttribute( "data-status" ) === "0" ) {
+                    $( '.qr_stuff' ).classList.remove( "hidden" );
+                    var lnurl = wallet_info[ "lud06" ];
+                    var url = "lightning:" + lnurl;
+                    var a = document.createElement( "a" );
+                    a.href = url;
+                    a.target = "_blank";
+                    a.append( createQR( url.toUpperCase() ) );
+                    var prep_div = document.createElement( "div" );
+                    prep_div.append( a );
+                    var div_html = prep_div.innerHTML;
+                    var html = `${div_html}`;
+                    var div = document.createElement( "div" );
+                    div.innerHTML = html;
+                    $( '.qr_code' ).innerHTML = ``;
+                    $( '.qr_code' ).append( div.firstElementChild );
+                    $( '.wallet' ).setAttribute( "data-status", "1" );
+                    if ( $_GET[ "privkey" ] ) $( '.withdraw' ).click(); else $( '.deposit' ).click();
+                } else if ( $( '.wallet' ).getAttribute( "data-status" ) === "1" ) {
+                    $( '.qr_stuff' ).classList.add( "hidden" );
+                    $( '.wallet' ).setAttribute( "data-status", "0" );
+                }
+            }
+            $( '.deposit' ).onclick = () => {
+                $( '.withdraw' ).classList.remove( "underline" );
+                $( '.deposit' ).classList.add( "underline" );
+                $( '.qr_postscript' ).classList.add( "hidden" );
+                var lnurl = wallet_info[ "lud06" ];
+                var url = "lightning:" + lnurl;
+                var a = document.createElement( "a" );
+                a.href = url;
+                a.target = "_blank";
+                a.append( createQR( url.toUpperCase() ) );
+                var prep_div = document.createElement( "div" );
+                prep_div.append( a );
+                var div_html = prep_div.innerHTML;
+                var html = `${div_html}`;
+                var div = document.createElement( "div" );
+                div.innerHTML = html;
+                $( '.qr_code' ).innerHTML = ``;
+                $( '.qr_code' ).append( div.firstElementChild );
+            }
+            $( '.withdraw' ).onclick = () => {
+                $( '.deposit' ).classList.remove( "underline" );
+                $( '.withdraw' ).classList.add( "underline" );
+                $( '.qr_postscript' ).classList.remove( "hidden" );
+                var lnurl = wallet_info[ "lud03" ];
+                var url = "lightning:" + lnurl;
+                var a = document.createElement( "a" );
+                a.href = url;
+                a.target = "_blank";
+                a.append( createQR( url.toUpperCase() ) );
+                var prep_div = document.createElement( "div" );
+                prep_div.append( a );
+                var div_html = prep_div.innerHTML;
+                var html = `${div_html}`;
+                var div = document.createElement( "div" );
+                div.innerHTML = html;
+                $( '.qr_code' ).innerHTML = ``;
+                $( '.qr_code' ).append( div.firstElementChild );
+            }
+            loop();
+        </script>
+    </body>
+</html>
